@@ -9,6 +9,7 @@
 - push: активные офферы с долями уходят в Keitaro, затем поток перечитывается и сверяется.
 """
 
+import json
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -152,41 +153,42 @@ def _sync_stream_offers(db: Session, stream: Stream, all_kt_links: list[dict], n
 
     # Если в Keitaro сумма долей не 100 (например, оффер удалили прямо в трекере),
     # пересчитываем черновик: поток станет жёлтым, и Push приведёт Keitaro к 100%.
-    active = [link for link in stream.offers if link.status == ACTIVE]
-    if active and sum(link.share for link in active) != TOTAL:
-        try:
-            recalculate(sorted(stream.offers, key=lambda link: link.id))
-        except WeightError:
-            pass  # закреплено больше 100% — покажем как есть, Push не пропустит
+    _normalize_to_100(stream)
+
+
+def _normalize_to_100(stream: Stream) -> None:
+    """Если активные доли в сумме не 100, пересчитать черновик (поток станет жёлтым).
+
+    Если закрепления не дают этого сделать (закреплены все или их сумма больше 100),
+    закрепления в потоке снимаются: держать их всё равно невозможно.
+    """
+    links = sorted(stream.offers, key=lambda link: link.id)
+    active = [link for link in links if link.status == ACTIVE]
+    if not active or sum(link.share for link in active) == TOTAL:
+        return
+    try:
+        recalculate(links)
+    except WeightError:
+        pass
+    if sum(link.share for link in active) != TOTAL:
+        for link in active:
+            link.pinned = False
+        recalculate(links)
+    for link in links:
+        link.published_pinned = link.pinned
 
 
 # ---------- правки черновика ----------
 
-def _back_to_published(stream: Stream) -> bool:
-    """Черновик по сути вернулся к опубликованному (например, оффер добавили и тут же убрали).
-
-    Совпадает набор активных офферов, у закреплённых доли не менялись,
-    а опубликованные доли в сумме дают 100%.
-    """
-    links = stream.offers
-    if any(link.is_new or link.status != link.published_status for link in links):
-        return False
-    if any(link.status == ACTIVE and link.pinned and link.share != link.published_share for link in links):
-        return False
-    return sum(link.published_share for link in links if link.published_status == ACTIVE) == TOTAL
-
-
-def _recalc(stream: Stream, allow_restore: bool = True) -> None:
-    if allow_restore and _back_to_published(stream):
-        # Возвращаем ровно опубликованные доли: иначе 33/33/34 из Keitaro
-        # «пересчиталось» бы в 34/33/33 и поток зря стал бы жёлтым.
-        for link in stream.offers:
-            link.share = link.published_share
-        return
+def _recalc(stream: Stream) -> None:
+    links = sorted(stream.offers, key=lambda link: link.id)
     try:
-        recalculate(stream.offers)
+        recalculate(links)
     except WeightError as exc:
         raise EditorError(str(exc)) from exc
+    # pin — локальная настройка, у неё нет черновика: снятие pin при remove сохраняется сразу
+    for link in links:
+        link.published_pinned = link.pinned
 
 
 def add_offer(db: Session, kt: KeitaroClient, stream_id: int, offer_keitaro_id: int) -> Stream:
@@ -286,7 +288,7 @@ def set_share(db: Session, link_id: int, share: int) -> Stream:
     link.share = share
     link.pinned = True
     link.published_pinned = True
-    _recalc(link.stream, allow_restore=False)
+    _recalc(link.stream)
     db.commit()
     return link.stream
 
@@ -299,7 +301,11 @@ def cancel(db: Session, stream_id: int) -> Stream:
             continue
         link.status = link.published_status
         link.share = link.published_share
-        link.pinned = link.published_pinned
+        if link.status != ACTIVE:
+            link.pinned = False
+    db.flush()
+    db.refresh(stream)
+    _normalize_to_100(stream)  # если в Keitaro сумма не 100, черновик снова выравнивается
     db.commit()
     db.refresh(stream)
     return stream
@@ -315,7 +321,7 @@ def push(db: Session, kt: KeitaroClient, stream_id: int) -> Stream:
         raise EditorError(str(exc)) from exc
 
     # Защита от затирания: поток в Keitaro должен совпадать с тем, что мы видели при Fetch
-    before = kt.get_stream(stream.keitaro_id)
+    before = kt.get_stream(stream.keitaro_id) or {}
     current = {int(o["offer_id"]): int(o.get("share") or 0) for o in _kt_offer_links(before)}
     known = {
         link.offer.keitaro_id: link.published_share
@@ -329,17 +335,24 @@ def push(db: Session, kt: KeitaroClient, stream_id: int) -> Stream:
         )
 
     active = [link for link in stream.offers if link.status == ACTIVE]
+    active_ids = {link.offer.keitaro_id for link in active}
     payload = {
         "offers": [
             {"offer_id": link.offer.keitaro_id, "share": link.share, "state": ACTIVE} for link in active
+        ]
+        # отключённые (disabled) в Keitaro привязки не трогаем — отправляем как были
+        + [
+            {"offer_id": int(o["offer_id"]), "share": int(o.get("share") or 0), "state": o["state"]}
+            for o in before.get("offers") or []
+            if o.get("state", ACTIVE) != ACTIVE and int(o["offer_id"]) not in active_ids
         ]
     }
     kt.update_stream(stream.keitaro_id, payload)
 
     # Сверяем, что Keitaro сохранил ровно то, что отправили
-    after = kt.get_stream(stream.keitaro_id)
+    after = kt.get_stream(stream.keitaro_id) or {}
     saved = {int(o["offer_id"]): int(o.get("share") or 0) for o in _kt_offer_links(after)}
-    expected = {o["offer_id"]: o["share"] for o in payload["offers"]}
+    expected = {o["offer_id"]: o["share"] for o in payload["offers"] if o["state"] == ACTIVE}
     if saved != expected:
         raise KeitaroError(
             f"Keitaro сохранил другой набор офферов: отправили {expected}, в трекере {saved}. "
@@ -374,7 +387,9 @@ _GUARDED_FIELDS = ("name", "type", "position", "state", "schema", "action_type",
 def _norm(field: str, value):
     if field == "filters":
         return sorted(
-            (f.get("name"), f.get("mode"), tuple(sorted(map(str, f.get("payload") or []))))
+            json.dumps({"name": f.get("name"), "mode": f.get("mode"), "payload": f.get("payload")},
+                       sort_keys=True, default=str)
             for f in value or []
+            if isinstance(f, dict)
         )
-    return value
+    return json.dumps(value, sort_keys=True, default=str)

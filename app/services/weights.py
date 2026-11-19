@@ -4,8 +4,10 @@
 - удалённый (removed) оффер получает 0%;
 - запиненные активные офферы сохраняют свою долю;
 - остаток 100 - сумма_запиненных делится поровну между незапиненными активными;
-- доли целые, остаток от деления по +1 получают первые по порядку (75 на двоих -> 38/37,
-  100 на троих -> 34/33/33).
+- доли целые; остаток от деления по +1 получают офферы с большей опубликованной долей,
+  при равенстве — первые по порядку (75 на двоих -> 38/37, 100 на троих -> 34/33/33).
+  Так пересчёт опубликованного 33/33/34 из Keitaro даёт те же 33/33/34, и поток
+  не желтеет без настоящих изменений.
 """
 
 from collections.abc import Sequence
@@ -24,6 +26,7 @@ class _Link(Protocol):
     status: str
     share: int
     pinned: bool
+    published_share: int
 
 
 def split_evenly(total: int, n: int) -> list[int]:
@@ -50,8 +53,10 @@ def recalculate(links: Sequence[_Link]) -> None:
         raise WeightError(f"Сумма запиненных долей {fixed}% больше 100%")
 
     free = [link for link in active if not link.pinned]
-    for link, share in zip(free, split_evenly(TOTAL - fixed, len(free)), strict=True):
-        link.share = share
+    # кому достанется +1 от остатка: сначала тем, у кого опубликованная доля больше
+    order = sorted(range(len(free)), key=lambda i: (-getattr(free[i], "published_share", 0), i))
+    for rank, share in zip(order, split_evenly(TOTAL - fixed, len(free)), strict=True):
+        free[rank].share = share
 
 
 def validate_for_publish(links: Sequence[_Link]) -> None:

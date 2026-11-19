@@ -22,7 +22,8 @@ class KeitaroError(Exception):
 class KeitaroClient:
     def __init__(self, settings: Settings | None = None, http: httpx.Client | None = None):
         self.settings = settings or get_settings()
-        base = self.settings.keitaro_url.rstrip("/") + "/admin_api/v1"
+        root = self.settings.keitaro_url.rstrip("/").removesuffix("/admin_api/v1")
+        base = root + "/admin_api/v1"
         self._http = http or httpx.Client(timeout=self.settings.keitaro_timeout)
         self._base = base
         self._headers = {"Api-Key": self.settings.keitaro_api_key, "Accept": "application/json"}

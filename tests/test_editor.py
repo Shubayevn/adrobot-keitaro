@@ -298,3 +298,96 @@ def test_wrong_keitaro_url_gives_clear_error(kt):
         lambda req: httpx.Response(301, headers={"location": "https://x/"})))
     with pytest.raises(KeitaroError, match="редирект"):
         KeitaroClient(kt.settings, http=redirect).list_campaigns()
+
+
+# ---------- регрессии по второму ревью ----------
+
+def test_unpin_then_remove_bring_back_gives_even_split(client, fake):
+    s = offers_stream(fetch(client, fake))
+    a, b = link_of(s, 3749), link_of(s, 3717)
+    client.post(f"/api/stream-offers/{a['id']}/share", json={"share": 60})
+    client.post(f"/api/streams/{s['id']}/push")  # 60/20/20
+    client.post(f"/api/stream-offers/{a['id']}/pin", json={"pinned": False})
+    client.post(f"/api/stream-offers/{b['id']}/remove")
+    s = client.post(f"/api/stream-offers/{b['id']}/bring-back").json()
+    assert shares(s) == {3749: 34, 3717: 33, 3801: 33}  # +1 тому, у кого опубликовано больше
+    assert s["dirty"] is True
+
+
+def test_scalar_filter_payload_does_not_break_push(client, fake):
+    s = offers_stream(fetch(client, fake))
+    fake.streams[s["keitaro_id"]]["filters"] = [{"name": "bot", "mode": "reject", "payload": True}]
+    s = client.post(f"/api/streams/{s['id']}/offers", json={"offer_id": 3802}).json()
+    r = client.post(f"/api/streams/{s['id']}/push")
+    assert r.status_code == 200, r.text
+
+
+def test_all_pinned_and_one_deleted_in_keitaro_is_normalized(client, fake):
+    s = offers_stream(fetch(client, fake))
+    for o in s["offers"]:
+        client.post(f"/api/stream-offers/{o['id']}/pin", json={"pinned": True})
+    kt_stream = fake.streams[s["keitaro_id"]]
+    kt_stream["offers"] = [o for o in kt_stream["offers"] if o["offer_id"] != 3749]
+    s = offers_stream(fetch(client, fake))
+    assert s["total_share"] == 100 and s["dirty"] is True
+    assert client.post(f"/api/streams/{s['id']}/push").status_code == 200
+
+
+def test_pinned_over_100_in_keitaro_is_normalized(client, fake):
+    s = offers_stream(fetch(client, fake))
+    for o in s["offers"]:
+        client.post(f"/api/stream-offers/{o['id']}/pin", json={"pinned": True})
+    for o in fake.streams[s["keitaro_id"]]["offers"]:
+        o["share"] = 60
+    s = offers_stream(fetch(client, fake))
+    assert shares(s) == {3749: 34, 3717: 33, 3801: 33}
+    assert all(not o["pinned"] for o in s["offers"])
+
+
+def test_cancel_keeps_normalization_after_keitaro_side_removal(client, fake):
+    s = offers_stream(fetch(client, fake))
+    kt_stream = fake.streams[s["keitaro_id"]]
+    kt_stream["offers"] = [o for o in kt_stream["offers"] if o["offer_id"] != 3749]  # 33 + 34
+    s = offers_stream(fetch(client, fake))
+    s = client.post(f"/api/streams/{s['id']}/cancel").json()
+    assert s["total_share"] == 100 and s["dirty"] is True
+
+
+def test_pin_state_consistent_after_remove_bring_back_and_fetch(client, fake):
+    s = offers_stream(fetch(client, fake))
+    a = link_of(s, 3749)
+    client.post(f"/api/stream-offers/{a['id']}/pin", json={"pinned": True})
+    client.post(f"/api/stream-offers/{a['id']}/remove")
+    s = client.post(f"/api/stream-offers/{a['id']}/bring-back").json()
+    assert link_of(s, 3749)["pinned"] is False
+    s = offers_stream(fetch(client, fake))
+    assert link_of(s, 3749)["pinned"] is False
+
+
+def test_manual_share_then_cancel_keeps_pin_as_local_setting(client, fake):
+    s = offers_stream(fetch(client, fake))
+    a = link_of(s, 3749)
+    client.post(f"/api/stream-offers/{a['id']}/share", json={"share": 60})
+    s = client.post(f"/api/streams/{s['id']}/cancel").json()
+    assert shares(s) == {3749: 33, 3717: 33, 3801: 34}
+    assert s["dirty"] is False
+    assert link_of(s, 3749)["pinned"] is True  # pin — локальная настройка, Cancel её не трогает
+
+
+def test_push_keeps_disabled_links_in_keitaro(client, fake):
+    s = offers_stream(fetch(client, fake))
+    kid = s["keitaro_id"]
+    fake.streams[kid]["offers"].append({"id": 3, "stream_id": kid, "offer_id": 3805, "share": 0, "state": "disabled"})
+    s = offers_stream(fetch(client, fake))
+    s = client.post(f"/api/streams/{s['id']}/offers", json={"offer_id": 3802}).json()
+    assert client.post(f"/api/streams/{s['id']}/push").status_code == 200
+    states = {o["offer_id"]: o["state"] for o in fake.streams[kid]["offers"]}
+    assert states[3805] == "disabled"
+
+
+def test_keitaro_url_with_api_suffix_is_accepted(kt):
+    from app.config import Settings
+    from app.keitaro import KeitaroClient
+
+    s = Settings(_env_file=None, keitaro_url="https://t.example.com/admin_api/v1/")
+    assert KeitaroClient(s)._base == "https://t.example.com/admin_api/v1"
