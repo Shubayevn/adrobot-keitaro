@@ -34,11 +34,17 @@ class KeitaroClient:
             resp = self._http.request(method, url, headers=self._headers, **kwargs)
         except httpx.HTTPError as exc:
             raise KeitaroError(f"Keitaro недоступен: {exc}") from exc
-        if resp.status_code >= 400:
+        if not 200 <= resp.status_code < 300:
+            if 300 <= resp.status_code < 400:
+                raise KeitaroError(
+                    f"Keitaro {method} {path} -> редирект {resp.status_code} на {resp.headers.get('location')}. "
+                    "Проверьте KEITARO_URL (http/https, без /admin_api/v1).",
+                    status_code=resp.status_code,
+                )
             try:
                 payload = resp.json()
             except ValueError:
-                payload = resp.text
+                payload = resp.text[:300]
             message = payload.get("error") if isinstance(payload, dict) else None
             raise KeitaroError(
                 f"Keitaro {method} {path} -> {resp.status_code}: {message or payload}",
@@ -47,7 +53,13 @@ class KeitaroClient:
             )
         if not resp.content:
             return None
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise KeitaroError(
+                f"Keitaro {method} {path} вернул не JSON — проверьте KEITARO_URL "
+                "(нужен адрес трекера без /admin_api/v1)."
+            ) from exc
 
     # --- справочники ---
     def list_offers(self) -> list[dict]:

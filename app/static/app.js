@@ -267,7 +267,7 @@ window.App = (function ($) {
       api("POST", "/api/streams/" + streamId(this) + "/push").done(function (s) {
         replaceStream(s);
         alertBox("success", "Поток «" + esc(s.name) + "» опубликован в Keitaro", 2500);
-      }).always(function () { $b.prop("disabled", false).text("⭱ PUSH TO KT"); });
+      }).fail(load).always(function () { $b.prop("disabled", false).text("⭱ PUSH TO KT"); });
     });
 
     load();

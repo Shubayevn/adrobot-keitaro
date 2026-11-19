@@ -315,7 +315,8 @@ def push(db: Session, kt: KeitaroClient, stream_id: int) -> Stream:
         raise EditorError(str(exc)) from exc
 
     # Защита от затирания: поток в Keitaro должен совпадать с тем, что мы видели при Fetch
-    current = {int(o["offer_id"]): int(o.get("share") or 0) for o in _kt_offer_links(kt.get_stream(stream.keitaro_id))}
+    before = kt.get_stream(stream.keitaro_id)
+    current = {int(o["offer_id"]): int(o.get("share") or 0) for o in _kt_offer_links(before)}
     known = {
         link.offer.keitaro_id: link.published_share
         for link in stream.offers
@@ -336,7 +337,8 @@ def push(db: Session, kt: KeitaroClient, stream_id: int) -> Stream:
     kt.update_stream(stream.keitaro_id, payload)
 
     # Сверяем, что Keitaro сохранил ровно то, что отправили
-    saved = {int(o["offer_id"]): int(o.get("share") or 0) for o in _kt_offer_links(kt.get_stream(stream.keitaro_id))}
+    after = kt.get_stream(stream.keitaro_id)
+    saved = {int(o["offer_id"]): int(o.get("share") or 0) for o in _kt_offer_links(after)}
     expected = {o["offer_id"]: o["share"] for o in payload["offers"]}
     if saved != expected:
         raise KeitaroError(
@@ -354,4 +356,25 @@ def push(db: Session, kt: KeitaroClient, stream_id: int) -> Stream:
         link.published_pinned = link.pinned
     db.commit()
     db.refresh(stream)
+
+    # Офферы сохранены. Проверяем, что PUT с одним полем offers не задел остальное в потоке.
+    changed = [f for f in _GUARDED_FIELDS if _norm(f, before.get(f)) != _norm(f, after.get(f))]
+    if changed:
+        raise KeitaroError(
+            "Офферы сохранены, но Keitaro изменил в потоке другие поля: "
+            + ", ".join(changed)
+            + ". Проверьте поток в Keitaro."
+        )
     return stream
+
+
+_GUARDED_FIELDS = ("name", "type", "position", "state", "schema", "action_type", "action_payload", "filters")
+
+
+def _norm(field: str, value):
+    if field == "filters":
+        return sorted(
+            (f.get("name"), f.get("mode"), tuple(sorted(map(str, f.get("payload") or []))))
+            for f in value or []
+        )
+    return value

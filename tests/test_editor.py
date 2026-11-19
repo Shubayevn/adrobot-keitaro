@@ -260,3 +260,41 @@ def test_push_refuses_when_keitaro_changed_after_fetch(client, fake):
     assert r.status_code == 400
     assert "Fetch" in r.json()["detail"]
     assert 3805 in kt_shares(fake, s["keitaro_id"])  # ничего не затёрли
+
+
+def test_push_reports_if_keitaro_touched_other_fields(client, fake, monkeypatch):
+    s = offers_stream(fetch(client, fake))
+    s = client.post(f"/api/streams/{s['id']}/offers", json={"offer_id": 3802}).json()
+    kid = s["keitaro_id"]
+    original = __import__("app.keitaro", fromlist=["KeitaroClient"]).KeitaroClient.update_stream
+
+    def wipe_filters(self, sid, data):
+        res = original(self, sid, data)
+        fake.streams[sid]["filters"] = []
+        fake.streams[sid]["schema"] = "redirect"
+        return res
+
+    fake.streams[kid]["filters"] = [{"name": "country", "mode": "accept", "payload": ["RO"]}]
+    monkeypatch.setattr("app.keitaro.KeitaroClient.update_stream", wipe_filters)
+    r = client.post(f"/api/streams/{s['id']}/push")
+    assert r.status_code == 502
+    assert "schema" in r.json()["detail"] and "filters" in r.json()["detail"]
+    # офферы при этом сохранены и помечены опубликованными
+    state = offers_stream(client.get(f"/api/campaigns/{campaign_id(fake)}").json())
+    assert state["dirty"] is False
+
+
+def test_wrong_keitaro_url_gives_clear_error(kt):
+    import httpx
+    import pytest
+
+    from app.keitaro import KeitaroClient, KeitaroError
+
+    html = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, text="<html>login</html>")))
+    with pytest.raises(KeitaroError, match="KEITARO_URL"):
+        KeitaroClient(kt.settings, http=html).list_campaigns()
+
+    redirect = httpx.Client(transport=httpx.MockTransport(
+        lambda req: httpx.Response(301, headers={"location": "https://x/"})))
+    with pytest.raises(KeitaroError, match="редирект"):
+        KeitaroClient(kt.settings, http=redirect).list_campaigns()
