@@ -186,9 +186,6 @@ def _recalc(stream: Stream) -> None:
         recalculate(links)
     except WeightError as exc:
         raise EditorError(str(exc)) from exc
-    # pin — локальная настройка, у неё нет черновика: снятие pin при remove сохраняется сразу
-    for link in links:
-        link.published_pinned = link.pinned
 
 
 def add_offer(db: Session, kt: KeitaroClient, stream_id: int, offer_keitaro_id: int) -> Stream:
@@ -301,8 +298,8 @@ def cancel(db: Session, stream_id: int) -> Stream:
             continue
         link.status = link.published_status
         link.share = link.published_share
-        if link.status != ACTIVE:
-            link.pinned = False
+        # снятие закрепления при Remove — часть черновика, откатываем его тоже
+        link.pinned = link.published_pinned if link.status == ACTIVE else False
     db.flush()
     db.refresh(stream)
     _normalize_to_100(stream)  # если в Keitaro сумма не 100, черновик снова выравнивается

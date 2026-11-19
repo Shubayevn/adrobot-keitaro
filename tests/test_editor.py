@@ -360,8 +360,28 @@ def test_pin_state_consistent_after_remove_bring_back_and_fetch(client, fake):
     client.post(f"/api/stream-offers/{a['id']}/remove")
     s = client.post(f"/api/stream-offers/{a['id']}/bring-back").json()
     assert link_of(s, 3749)["pinned"] is False
+    # Fetch сбрасывает черновик (в т.ч. снятие pin при Remove) — закрепление возвращается
+    s = offers_stream(fetch(client, fake))
+    assert link_of(s, 3749)["pinned"] is True
+    # а после Push снятие закрепления сохраняется
+    client.post(f"/api/stream-offers/{a['id']}/remove")
+    client.post(f"/api/stream-offers/{a['id']}/bring-back")
+    client.post(f"/api/streams/{s['id']}/push")
     s = offers_stream(fetch(client, fake))
     assert link_of(s, 3749)["pinned"] is False
+
+
+def test_remove_then_cancel_restores_pin(client, fake):
+    s = offers_stream(fetch(client, fake))
+    a = link_of(s, 3749)
+    client.post(f"/api/stream-offers/{a['id']}/share", json={"share": 60})
+    client.post(f"/api/streams/{s['id']}/push")  # 60 (pinned) / 20 / 20
+    client.post(f"/api/stream-offers/{a['id']}/remove")
+    s = client.post(f"/api/streams/{s['id']}/cancel").json()
+    assert shares(s) == {3749: 60, 3717: 20, 3801: 20}
+    assert link_of(s, 3749)["pinned"] is True and s["dirty"] is False
+    s = client.post(f"/api/streams/{s['id']}/offers", json={"offer_id": 3802}).json()
+    assert link_of(s, 3749)["share"] == 60
 
 
 def test_manual_share_then_cancel_keeps_pin_as_local_setting(client, fake):
