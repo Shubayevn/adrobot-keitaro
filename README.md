@@ -1,0 +1,169 @@
+# AdRobot · Keitaro wrapper
+
+Тестовое задание: обёртка над рекламным трекером [Keitaro](https://keitaro.io) на **FastAPI + SQLAlchemy**.
+Фронт: серверные шаблоны Jinja2 + jQuery (Select2 для автокомплита офферов) + Bootstrap, без сборки.
+
+1. **«Создаватор» кампаний** (`/`). На вход: название, гео (одна или несколько стран) и оффер (поиск с автокомплитом).
+   В Keitaro создаётся кампания с доменом, группой и источником трафика и двумя потоками:
+   - **Flow 1** ловит трафик из указанных стран (фильтр «Страна: принимать») и редиректит на `https://google.com`;
+   - **Flow 2** отправляет весь остальной трафик на выбранный оффер (100%).
+2. **Редактор офферов в потоках** (`/campaigns` → кампания). Повторяет логику из видео: Fetch, Add, Remove,
+   Bring back, Pin, Push to KT, Cancel. Подробно описано [ниже](#логика-редактора).
+
+## Быстрый старт
+
+Нужен Python 3.11+ и [uv](https://docs.astral.sh/uv/). Вариант без uv описан ниже.
+
+```bash
+git clone https://github.com/Shubayevn/adrobot-keitaro.git
+cd adrobot-keitaro
+uv sync                      # зависимости в .venv
+cp .env.example .env         # впишите KEITARO_URL и KEITARO_API_KEY
+uv run alembic upgrade head  # миграции (по умолчанию SQLite-файл adrobot.db)
+uv run uvicorn app.main:app --reload --port 8000
+```
+
+Откройте http://127.0.0.1:8000.
+
+Ключ API: в админке Keitaro откройте «Профиль» → «API ключи». Адрес трекера указывается без `/admin_api/v1`.
+
+Проверка связи с трекером работает только на чтение и ничего не создаёт:
+
+```bash
+uv run python -m tools.check_keitaro
+uv run python -m tools.check_keitaro --campaign 12   # плюс сырые потоки кампании 12
+```
+
+Скрипт выводит, сколько в трекере офферов, доменов, групп, источников и кампаний. Ещё он сверяет значения из `.env`
+со справочниками трекера: `REDIRECT_ACTION_TYPE` с `/streams_actions`, `COUNTRY_FILTER_NAME` с `/stream_filters`.
+
+### Без uv
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+alembic upgrade head
+uvicorn app.main:app --reload --port 8000
+```
+
+### Попробовать без настоящего Keitaro
+
+В репозитории есть фейковый Keitaro Admin API, который хранит всё в памяти. В нём уже лежит кампания «campaign 2»
+как в видео: Flow 1 (AU → google) и Flow 2 с тремя офферами 33/33/34.
+
+```bash
+uv run uvicorn tools.fake_keitaro:app --port 8081
+```
+
+Во втором терминале запустите само приложение:
+
+```bash
+KEITARO_URL=http://127.0.0.1:8081 KEITARO_API_KEY=any uv run uvicorn app.main:app --port 8000
+```
+
+Чтобы сымитировать удаление офферов прямо в Keitaro, отправьте в фейк `PUT`:
+
+```bash
+curl -X PUT localhost:8081/admin_api/v1/streams/1002 -H 'Content-Type: application/json' -d '{"offers":[{"offer_id":3801,"share":100}]}'
+```
+
+После этого нажмите в обёртке «Fetch streams from KT».
+
+## Миграции
+
+Используется Alembic. URL базы берётся из `DATABASE_URL` в `.env`.
+
+```bash
+uv run alembic upgrade head                             # применить
+uv run alembic downgrade -1                             # откатить последнюю
+uv run alembic revision --autogenerate -m "что меняем"  # новая миграция после правки app/models.py
+```
+
+Для Postgres укажите `DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/adrobot`. Драйвер `psycopg` уже входит в зависимости.
+
+## Настройки (`.env`)
+
+| Переменная | Что это |
+|---|---|
+| `KEITARO_URL`, `KEITARO_API_KEY` | адрес трекера и Admin API ключ |
+| `KEITARO_DEFAULT_DOMAIN_ID`, `KEITARO_DEFAULT_GROUP_ID`, `KEITARO_DEFAULT_TRAFFIC_SOURCE_ID` | что подставлять в форму создания по умолчанию. Если пусто, выбираете в форме из списков Keitaro; там же можно создать новую группу |
+| `REDIRECT_URL`, `REDIRECT_ACTION_TYPE`, `COUNTRY_FILTER_NAME` | как собирается Flow 1 (по умолчанию `https://google.com`, `http`, `country`) |
+| `OFFERS_STREAM_SCHEMA`, `OFFERS_STREAM_ACTION_TYPE` | как собирается Flow 2 (по умолчанию `landings` без лендингов и `http`) |
+| `DATABASE_URL` | база, по умолчанию `sqlite:///./adrobot.db` |
+
+## Логика редактора
+
+Keitaro хранит только опубликованное состояние. В нашей базе у каждой привязки «поток — оффер» есть две версии:
+черновик (`status`, `share`, `pinned`) и опубликованная (`published_*`, `is_new`). Поток подсвечивается жёлтым
+и показывает кнопки **Push to KT** и **Cancel**, если черновик хоть в чём-то расходится с опубликованным.
+
+| Действие | Что происходит |
+|---|---|
+| **Fetch streams from KT** | Потоки и офферы забираются из Keitaro. Поток без офферов показывается строкой, его содержимое (редирект, фильтры) не разбирается. Офферы, о которых обёртка знала, но которых в Keitaro больше нет, не пропадают: они переходят в `removed` (серые, 0%, кнопка Bring back). Keitaro считается источником правды, поэтому неопубликованный черновик при Fetch сбрасывается. Закрепления (pin) сохраняются |
+| **Add** | Оффер ищется через наше API (`/api/offers`, оно ходит в Keitaro, список кэшируется на 60 с). Веса пересчитываются, оффер помечается `new`, в Keitaro пока ничего не уходит |
+| **Remove** | Оффер становится серым, доля 0%, остальные пересчитываются. После Push он исчезает из Keitaro, но остаётся у нас в архиве. Неопубликованный новый оффер удаляется сразу |
+| **Bring back** | Оффер снова активен, веса пересчитываются, поток жёлтый до Push |
+| **Pin** (булавка) | Доля оффера закрепляется. Все следующие пересчёты распределяют только остаток `100 − сумма закреплённых` |
+| **Клик по проценту** | Задать долю вручную. Доля сразу закрепляется. Если сумма закреплённых превысит 100%, операция отклоняется |
+| **Cancel** | Добавленные до публикации офферы удаляются из базы. Остальное (Remove, Bring back, ручные доли) откатывается к опубликованному. Поток снова белый |
+| **Push to KT** | В Keitaro уходит `PUT /streams/{id}` со списком активных офферов и их долями. Затем поток перечитывается из Keitaro и сверяется с отправленным; при расхождении показывается ошибка, и поток не помечается опубликованным |
+
+**Как считаются веса.** Доли целые, сумма 100. Удалённые офферы получают 0%. Закреплённые сохраняют свою долю.
+Остаток делится поровну между незакреплёнными активными, и лишний процент от деления получают первые по порядку:
+75 на двоих даёт 38/37, 100 на троих даёт 34/33/33 (так в видео).
+Если набор офферов вернулся к опубликованному (например, оффер добавили и сразу удалили), возвращаются и опубликованные
+доли. Иначе 33/33/34 из Keitaro «пересчиталось» бы в 34/33/33, и поток зря стал бы жёлтым.
+
+**Push не выполняется**, если в потоке не осталось активных офферов (трафику было бы некуда идти) или если сумма
+долей не равна 100%. Второе возможно, только когда закреплены все активные офферы.
+
+## Какие запросы к Keitaro используются
+
+Все запросы собраны в `app/keitaro.py` (Admin API v1, заголовок `Api-Key`):
+`GET /offers`, `/domains`, `/groups?type=campaigns`, `POST /groups`, `GET /traffic_sources`,
+`GET/POST /campaigns`, `GET /campaigns/{id}`, `DELETE /campaigns/{id}`, `GET /campaigns/{id}/streams`,
+`POST /streams`, `GET/PUT /streams/{id}`, `GET /streams_actions`, `GET /stream_filters`.
+
+Если при создании кампании не удалось создать поток, кампания удаляется (в Keitaro она уходит в архив), и форма
+показывает ошибку. Полукампаний не остаётся.
+
+**Что проверено только по спецификации, без живого трекера.** Обёртка написана по OpenAPI-спецификации
+(https://admin-api.docs.keitaro.io), а тесты гоняются на фейковом Keitaro. Настоящий трекер может повести себя иначе
+в трёх местах, и все они настраиваются через `.env`:
+- значения `action_type` для редиректа и для потока с офферами, имя фильтра страны. Их сверяет `tools.check_keitaro`;
+- что `PUT /streams/{id}` с полем `offers` заменяет список офферов целиком. Обёртка это не предполагает, а проверяет:
+  после Push она перечитывает поток и сообщает, если Keitaro сохранил другой набор;
+- что `alias` кампании обязателен. Обёртка генерирует его сама (8 символов).
+
+## Тесты
+
+```bash
+uv run pytest
+```
+
+Тесты покрывают расчёт весов, все сценарии из видео через HTTP API обёртки на фейковом Keitaro
+(add → push, cancel, remove → push → bring back, удаление офферов в самом Keitaro → fetch, pin, ручная доля),
+создание кампании (потоки, фильтр, откат при ошибке, валидация гео и оффера) и миграции Alembic (`upgrade` и `downgrade`).
+
+## Структура
+
+```
+app/
+  main.py            FastAPI-приложение, страницы и обработчики ошибок
+  config.py          настройки из .env
+  db.py, models.py   SQLAlchemy: campaigns, streams, offers, stream_offers
+  keitaro.py         клиент Keitaro Admin API
+  services/
+    creator.py       создание кампании с двумя потоками
+    editor.py        fetch, add, remove, bring back, pin, cancel, push
+    weights.py       пересчёт долей
+    offers.py        кэш и поиск офферов
+  routers/api.py     JSON API для фронта
+  templates/, static/  Jinja2 + jQuery
+alembic/             миграции
+tools/
+  fake_keitaro.py    фейковый Keitaro для тестов и демо
+  check_keitaro.py   проверка связи с настоящим трекером (только чтение)
+tests/
+```

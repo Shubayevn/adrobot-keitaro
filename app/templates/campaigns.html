@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Campaigns{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center mb-3">
+  <h4 class="mb-0 me-auto">Campaigns</h4>
+  <input class="form-control form-control-sm w-auto" id="campaign-filter" placeholder="фильтр по имени / ID">
+</div>
+<table class="table table-hover align-middle bg-white shadow-sm">
+  <thead class="table-light"><tr><th style="width:90px">ID</th><th>Name</th><th>Alias</th><th>State</th><th></th></tr></thead>
+  <tbody id="campaigns-body"><tr><td colspan="5" class="text-muted">Загрузка…</td></tr></tbody>
+</table>
+{% endblock %}
+{% block scripts %}<script>$(App.initCampaigns);</script>{% endblock %}

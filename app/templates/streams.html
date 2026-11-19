@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Streams{% endblock %}
+{% block content %}
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/campaigns">Campaigns</a></li>
+    <li class="breadcrumb-item" id="crumb-campaign">#{{ campaign_id }}</li>
+    <li class="breadcrumb-item active">Keitaro Streams</li>
+  </ol>
+</nav>
+<div class="d-flex flex-wrap gap-2 mb-3" id="toolbar" data-campaign-id="{{ campaign_id }}">
+  <button class="btn btn-light border fw-semibold" id="fetch-btn">FETCH STREAMS FROM KT ⭳</button>
+  <a class="btn btn-light border fw-semibold" target="_blank" rel="noopener"
+     href="{{ keitaro_url }}/admin/#!/campaigns/{{ campaign_id }}">VIEW IN KT ↗</a>
+  <div class="ms-auto form-check form-switch align-self-center">
+    <input class="form-check-input" type="checkbox" id="show-all" checked>
+    <label class="form-check-label" for="show-all">Show all offers (incl. removed)</label>
+  </div>
+</div>
+<div class="text-muted small mb-2" id="fetched-at"></div>
+<div id="streams"></div>
+{% endblock %}
+{% block scripts %}<script>$(App.initStreams);</script>{% endblock %}

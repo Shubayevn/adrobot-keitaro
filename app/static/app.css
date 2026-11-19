@@ -1,0 +1,11 @@
+body { background: #f4f6f9; }
+.stream-dirty { border-color: #f0c36d; }
+.stream-dirty > .card-header,
+.stream-dirty > .px-3 { background: #fff8e1; }
+.offer-dirty > td { background: #fffbea; }
+.offer-removed > td { color: #9aa0a6; background: #f6f7f8; }
+.offer-removed .badge { font-weight: 500; }
+.share { font-weight: 600; min-width: 3ch; display: inline-block; }
+.pin-btn { text-decoration: none; filter: grayscale(1); opacity: .45; }
+.pin-btn.pinned { filter: none; opacity: 1; }
+.select2-container .select2-selection--single { min-height: 38px; }
