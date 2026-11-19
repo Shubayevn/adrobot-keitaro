@@ -92,3 +92,19 @@ def test_api_key_header_sent(client, fake):
     client.post("/api/campaigns", json={"name": "h", "geo": "AU", "offer_id": 3749})
     body = next(b for m, p, b in fake.calls if m == "POST" and p.endswith("/campaigns"))
     assert json.loads(body)["cost_auto"] is True
+
+
+def test_group_not_created_when_validation_fails(client, fake):
+    before = len(fake.groups)
+    r = client.post("/api/campaigns", json={"name": "a", "geo": "AU", "offer_id": 999999, "new_group_name": "G"})
+    assert r.status_code == 400
+    assert len(fake.groups) == before
+
+
+def test_empty_env_values_are_allowed(tmp_path):
+    from app.config import Settings
+
+    env = tmp_path / ".env"
+    env.write_text("KEITARO_DEFAULT_DOMAIN_ID=\nKEITARO_DEFAULT_GROUP_ID=\nKEITARO_DEFAULT_TRAFFIC_SOURCE_ID=\n")
+    s = Settings(_env_file=str(env))
+    assert s.keitaro_default_domain_id is None

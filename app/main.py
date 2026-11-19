@@ -19,6 +19,22 @@ app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 app.include_router(api_router)
 
 
+@app.middleware("http")
+async def _csrf_guard(request: Request, call_next):
+    """Изменяющие запросы к API — только из нашего фронта.
+
+    jQuery сам ставит X-Requested-With на same-origin запросы, а чужой сайт не может
+    выставить этот заголовок без CORS-разрешения (CORS у нас не включён).
+    """
+    if (
+        request.url.path.startswith("/api/")
+        and request.method not in ("GET", "HEAD", "OPTIONS")
+        and request.headers.get("x-requested-with") != "XMLHttpRequest"
+    ):
+        return JSONResponse(status_code=403, content={"detail": "Нужен заголовок X-Requested-With: XMLHttpRequest"})
+    return await call_next(request)
+
+
 @app.exception_handler(EditorError)
 @app.exception_handler(CreatorError)
 async def _user_error(_: Request, exc: Exception):

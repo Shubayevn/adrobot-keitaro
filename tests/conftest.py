@@ -56,7 +56,7 @@ def db_session():
 def client(db_session, kt):
     app.dependency_overrides[get_db] = lambda: db_session
     app.dependency_overrides[get_keitaro] = lambda: kt
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Requested-With": "XMLHttpRequest"}) as c:
         yield c
     app.dependency_overrides.clear()
 

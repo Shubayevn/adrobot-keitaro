@@ -188,3 +188,75 @@ def test_keitaro_auth_error_is_reported(client, fake):
     r = client.post(f"/api/campaigns/{campaign_id(fake)}/fetch")
     assert r.status_code == 502
     assert "401" in r.json()["detail"]
+
+
+def test_csrf_guard_blocks_posts_without_header(client, fake):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    bare = TestClient(app)
+    r = bare.post(f"/api/campaigns/{campaign_id(fake)}/fetch")
+    assert r.status_code == 403
+    assert bare.get("/health").status_code == 200
+
+
+# ---------- регрессии по итогам ревью ----------
+
+def test_manual_share_survives_remove_and_bring_back(client, fake):
+    s = offers_stream(fetch(client, fake))
+    a, b = link_of(s, 3749), link_of(s, 3717)
+    client.post(f"/api/stream-offers/{a['id']}/share", json={"share": 60})
+    client.post(f"/api/streams/{s['id']}/push")
+    s = client.post(f"/api/stream-offers/{a['id']}/share", json={"share": 40}).json()
+    assert shares(s) == {3749: 40, 3717: 30, 3801: 30}
+    client.post(f"/api/stream-offers/{b['id']}/remove")
+    s = client.post(f"/api/stream-offers/{b['id']}/bring-back").json()
+    assert shares(s) == {3749: 40, 3717: 30, 3801: 30}
+    assert s["dirty"] is True
+
+
+def test_pin_is_saved_immediately_and_does_not_change_shares(client, fake):
+    s = offers_stream(fetch(client, fake))  # 33/33/34
+    a = link_of(s, 3749)
+    s = client.post(f"/api/stream-offers/{a['id']}/pin", json={"pinned": True}).json()
+    assert shares(s) == {3749: 33, 3717: 33, 3801: 34}
+    assert s["dirty"] is False
+    s = offers_stream(fetch(client, fake))
+    assert link_of(s, 3749)["pinned"] is True
+    # следующая операция уже учитывает pin
+    s = client.post(f"/api/stream-offers/{link_of(s, 3717)['id']}/remove").json()
+    assert shares(s) == {3749: 33, 3717: 0, 3801: 67}
+
+
+def test_disabled_offer_in_keitaro_shown_as_removed(client, fake):
+    s = offers_stream(fetch(client, fake))
+    kt_stream = fake.streams[s["keitaro_id"]]
+    kt_stream["offers"].append({"id": 1, "stream_id": s["keitaro_id"], "offer_id": 3805, "share": 0, "state": "disabled"})
+    s = offers_stream(fetch(client, fake))
+    assert link_of(s, 3805)["status"] == "removed"
+    s = client.post(f"/api/stream-offers/{link_of(s, 3805)['id']}/bring-back").json()
+    assert shares(s)[3805] == 25
+
+
+def test_keitaro_side_removal_without_renormalization_makes_stream_dirty(client, fake):
+    s = offers_stream(fetch(client, fake))
+    kt_stream = fake.streams[s["keitaro_id"]]
+    kt_stream["offers"] = [o for o in kt_stream["offers"] if o["offer_id"] != 3749]  # 33 + 34 = 67
+    s = offers_stream(fetch(client, fake))
+    assert shares(s) == {3749: 0, 3717: 50, 3801: 50}
+    assert s["dirty"] is True and s["total_share"] == 100
+    s = client.post(f"/api/streams/{s['id']}/push").json()
+    assert kt_shares(fake, s["keitaro_id"]) == {3717: 50, 3801: 50}
+
+
+def test_push_refuses_when_keitaro_changed_after_fetch(client, fake):
+    s = offers_stream(fetch(client, fake))
+    s = client.post(f"/api/streams/{s['id']}/offers", json={"offer_id": 3802}).json()
+    # кто-то добавил оффер прямо в Keitaro
+    fake.streams[s["keitaro_id"]]["offers"].append(
+        {"id": 2, "stream_id": s["keitaro_id"], "offer_id": 3805, "share": 10, "state": "active"})
+    r = client.post(f"/api/streams/{s['id']}/push")
+    assert r.status_code == 400
+    assert "Fetch" in r.json()["detail"]
+    assert 3805 in kt_shares(fake, s["keitaro_id"])  # ничего не затёрли

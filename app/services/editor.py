@@ -12,6 +12,7 @@
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.keitaro import KeitaroClient, KeitaroError
@@ -87,7 +88,7 @@ def fetch_campaign(db: Session, kt: KeitaroClient, keitaro_campaign_id: int) -> 
         stream.type = kt_stream.get("type")
         stream.schema = kt_stream.get("schema")
         db.flush()
-        _sync_stream_offers(db, stream, _kt_offer_links(kt_stream), names)
+        _sync_stream_offers(db, stream, kt_stream.get("offers") or [], names)
 
     for stream in list(campaign.streams):
         if stream.keitaro_id not in seen:
@@ -98,9 +99,20 @@ def fetch_campaign(db: Session, kt: KeitaroClient, keitaro_campaign_id: int) -> 
     return campaign
 
 
-def _sync_stream_offers(db: Session, stream: Stream, kt_links: list[dict], names: dict[int, str]) -> None:
+def _sync_stream_offers(db: Session, stream: Stream, all_kt_links: list[dict], names: dict[int, str]) -> None:
     local = {link.offer.keitaro_id: link for link in stream.offers}
+    kt_links = [o for o in all_kt_links if o.get("state", ACTIVE) == ACTIVE]
     kt_ids: set[int] = set()
+
+    # Отключённые (disabled) в Keitaro привязки показываем серыми, как удалённые
+    for kt_link in all_kt_links:
+        oid = int(kt_link["offer_id"])
+        if kt_link.get("state", ACTIVE) != ACTIVE and oid not in local:
+            offer = offers_svc.upsert_offer(db, oid, names.get(oid))
+            link = StreamOffer(stream=stream, offer=offer, status=REMOVED, share=0, pinned=False,
+                               is_new=False, published_status=REMOVED, published_share=0, published_pinned=False)
+            db.add(link)
+            local[oid] = link
 
     for kt_link in kt_links:
         oid = int(kt_link["offer_id"])
@@ -138,15 +150,30 @@ def _sync_stream_offers(db: Session, stream: Stream, kt_links: list[dict], names
     stream.has_offers = bool(kt_ids) or any(link.status == REMOVED for link in stream.offers)
     db.flush()
 
+    # Если в Keitaro сумма долей не 100 (например, оффер удалили прямо в трекере),
+    # пересчитываем черновик: поток станет жёлтым, и Push приведёт Keitaro к 100%.
+    active = [link for link in stream.offers if link.status == ACTIVE]
+    if active and sum(link.share for link in active) != TOTAL:
+        try:
+            recalculate(sorted(stream.offers, key=lambda link: link.id))
+        except WeightError:
+            pass  # закреплено больше 100% — покажем как есть, Push не пропустит
+
 
 # ---------- правки черновика ----------
 
 def _back_to_published(stream: Stream) -> bool:
-    """Набор офферов и закреплений совпал с опубликованным (например, добавили и тут же убрали)."""
-    return all(
-        not link.is_new and link.status == link.published_status and link.pinned == link.published_pinned
-        for link in stream.offers
-    )
+    """Черновик по сути вернулся к опубликованному (например, оффер добавили и тут же убрали).
+
+    Совпадает набор активных офферов, у закреплённых доли не менялись,
+    а опубликованные доли в сумме дают 100%.
+    """
+    links = stream.offers
+    if any(link.is_new or link.status != link.published_status for link in links):
+        return False
+    if any(link.status == ACTIVE and link.pinned and link.share != link.published_share for link in links):
+        return False
+    return sum(link.published_share for link in links if link.published_status == ACTIVE) == TOTAL
 
 
 def _recalc(stream: Stream, allow_restore: bool = True) -> None:
@@ -176,7 +203,10 @@ def add_offer(db: Session, kt: KeitaroClient, stream_id: int, offer_keitaro_id: 
             raise EditorError("Этот оффер уже есть в потоке")
         existing.status = ACTIVE  # был удалён — возвращаем
         existing.pinned = False
-    else:
+        _recalc(stream)
+        db.commit()
+        return stream
+    try:
         offer = offers_svc.upsert_offer(db, offer_keitaro_id, kt_offer["name"])
         link = StreamOffer(
             stream=stream,
@@ -192,8 +222,11 @@ def add_offer(db: Session, kt: KeitaroClient, stream_id: int, offer_keitaro_id: 
         db.add(link)
         db.flush()
         db.refresh(stream)
-    _recalc(stream)
-    db.commit()
+        _recalc(stream)
+        db.commit()
+    except IntegrityError as exc:  # двойной клик / параллельный запрос
+        db.rollback()
+        raise EditorError("Этот оффер уже есть в потоке") from exc
     return stream
 
 
@@ -224,11 +257,16 @@ def bring_back(db: Session, link_id: int) -> Stream:
 
 
 def set_pin(db: Session, link_id: int, pinned: bool) -> Stream:
+    """Pin — локальная настройка обёртки (Keitaro о ней не знает).
+
+    Сохраняется сразу, без Push, и сама доли не меняет: закрепляется текущее значение,
+    а пересчёт остальных случится при следующем add/remove/bring back.
+    """
     link = get_link(db, link_id)
     if link.status != ACTIVE:
         raise EditorError("Закрепить можно только активный оффер")
     link.pinned = pinned
-    _recalc(link.stream)
+    link.published_pinned = pinned
     db.commit()
     return link.stream
 
@@ -247,6 +285,7 @@ def set_share(db: Session, link_id: int, share: int) -> Stream:
         )
     link.share = share
     link.pinned = True
+    link.published_pinned = True
     _recalc(link.stream, allow_restore=False)
     db.commit()
     return link.stream
@@ -274,6 +313,19 @@ def push(db: Session, kt: KeitaroClient, stream_id: int) -> Stream:
         validate_for_publish(stream.offers)
     except WeightError as exc:
         raise EditorError(str(exc)) from exc
+
+    # Защита от затирания: поток в Keitaro должен совпадать с тем, что мы видели при Fetch
+    current = {int(o["offer_id"]): int(o.get("share") or 0) for o in _kt_offer_links(kt.get_stream(stream.keitaro_id))}
+    known = {
+        link.offer.keitaro_id: link.published_share
+        for link in stream.offers
+        if not link.is_new and link.published_status == ACTIVE
+    }
+    if current != known:
+        raise EditorError(
+            "Поток изменили в Keitaro после последнего Fetch — нажмите «Fetch streams from KT» "
+            "(неопубликованные правки при этом сбросятся) и повторите."
+        )
 
     active = [link for link in stream.offers if link.status == ACTIVE]
     payload = {

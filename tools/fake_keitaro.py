@@ -9,6 +9,7 @@ import copy
 import itertools
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 SEED_OFFERS = [
     (3749, "Miaflow [BEAUTY-RO-BE_0009] [pl - - spin ro -] 2. Основной, Румыния JS"),
@@ -83,6 +84,12 @@ def create_app(api_key: str | None = None, fake: FakeKeitaro | None = None) -> F
         body = await request.body()
         kt.calls.append((request.method, request.url.path, body.decode() if body else None))
         return await call_next(request)
+
+    @app.exception_handler(HTTPException)
+    async def keitaro_error_format(_: Request, exc: HTTPException):
+        # Keitaro отвечает {"error": "..."} без обёртки detail
+        body = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+        return JSONResponse(status_code=exc.status_code, content=body)
 
     p = "/admin_api/v1"
 

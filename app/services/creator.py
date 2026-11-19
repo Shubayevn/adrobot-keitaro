@@ -110,12 +110,11 @@ def create_campaign(
     s = kt.settings
     domain_id = domain_id or s.keitaro_default_domain_id
     traffic_source_id = traffic_source_id or s.keitaro_default_traffic_source_id
-    if new_group_name and new_group_name.strip():
-        group_id = int(kt.create_group(new_group_name.strip())["id"])
+    new_group_name = (new_group_name or "").strip()
     group_id = group_id or s.keitaro_default_group_id
     missing = [
         label
-        for label, value in (("домен", domain_id), ("группу", group_id), ("источник", traffic_source_id))
+        for label, value in (("домен", domain_id), ("группу", group_id or new_group_name), ("источник", traffic_source_id))
         if not value
     ]
     if missing:
@@ -123,6 +122,10 @@ def create_campaign(
 
     if offers_svc.find(kt, offer_id) is None:
         raise CreatorError(f"Оффер #{offer_id} не найден в Keitaro")
+
+    # группу создаём только после всех проверок, чтобы не плодить лишние
+    if new_group_name:
+        group_id = int(kt.create_group(new_group_name)["id"])
 
     campaign = kt.create_campaign(build_campaign_payload(name, domain_id, group_id, traffic_source_id))
     campaign_id = int(campaign["id"])

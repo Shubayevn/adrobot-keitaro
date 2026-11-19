@@ -220,6 +220,8 @@ window.App = (function ($) {
     function linkId(el) { return $(el).closest("tr").data("link"); }
 
     $("#fetch-btn").on("click", function () {
+      var dirty = state.streams.some(function (s) { return s.dirty; });
+      if (dirty && !window.confirm("Есть неопубликованные изменения. Fetch заменит их тем, что сейчас в Keitaro. Продолжить?")) return;
       var $b = $(this).prop("disabled", true);
       api("POST", "/api/campaigns/" + cid + "/fetch").done(function (c) {
         setCampaign(c);
@@ -234,7 +236,9 @@ window.App = (function ($) {
       var $card = $(this).closest(".stream");
       var offerId = $card.find("select.add-offer").val();
       if (!offerId) { alertBox("warning", "Выберите оффер", 3000); return; }
-      api("POST", "/api/streams/" + streamId(this) + "/offers", { offer_id: parseInt(offerId, 10) }).done(replaceStream);
+      var $b = $(this).prop("disabled", true);
+      api("POST", "/api/streams/" + streamId(this) + "/offers", { offer_id: parseInt(offerId, 10) })
+        .done(replaceStream).always(function () { $b.prop("disabled", false); });
     });
     $root.on("click", ".remove-btn", function () {
       api("POST", "/api/stream-offers/" + linkId(this) + "/remove").done(replaceStream);

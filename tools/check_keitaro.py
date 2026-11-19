@@ -41,7 +41,7 @@ def main() -> int:
         try:
             items = call() or []
             keys = {str(i.get(key)) for i in items if isinstance(i, dict)}
-            for w in wanted:
+            for w in dict.fromkeys(wanted):
                 mark = "OK " if w in keys else "НЕТ"
                 print(f"  [{mark}] {title}: '{w}'")
             if any(w not in keys for w in wanted):
